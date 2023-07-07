@@ -1,0 +1,121 @@
+---
+title: "Exponential Smoothing"
+execute:
+  echo: false
+format: html
+---
+
+
+```{r}
+#| label: setup
+#| include: false
+library(tidyverse)
+library(fpp3)
+library(lubridate)
+
+ambulance_demand_tsb <- read_rds("../data/ambulance_demand_tsb.rds")
+ambulance_demand_total <- ambulance_demand_tsb %>% index_by(date) %>% summarise(demand=sum(demand))
+```
+
+# Lab session 7: ETS: Exponential Smoothing
+
+Fitting ETS model (E: Error, T:Trend, S: Seasonality)
+Remember the following from ETS function
+
+N: None (No trend, no seasonality)
+A  additive
+Ad: additive damped
+M: multiplicative
+
+The function for exponential smoothing models in fable is `ETS()`
+check ?ETS in your Console
+
+If we don't provide arguments inside ETS(), then it is an automatic ETS! It will examine different models and return the one with lowest AICc.
+
+
+```{r fit-ets}
+admission_ets <- ambulance_demand_total %>%
+  model(
+    automatic_ets = ETS(demand)
+  )
+```
+
+let's now observe the fitted model
+
+```{r label, options}
+admission_ets %>% report()# provide a nice output of models with parameters estimated
+admission_ets %>% tidy()# provide parameters and its estimation
+
+ambulance_demand_total %>% head() %>% mutate(wday=wday(date, label = T))
+```
+
+We can use the `components()` function to observe the values corresponding to level, trend, seasonal equations in ETS framework. Each column corresponds to one equation:
+
+```{r observe-component}
+admission_ets %>% components()# provide a nice output of models with parameters estimated
+```
+
+Now, we can forecast with the fitted ETS model:
+
+```{r forecast-ets, options}
+admission_ets %>%
+  forecast(h = f_horizon) 
+```
+
+
+# Explore models and parameters effect 
+
+You can use the following specific functions: `error()`, `trend()`, `season()` to manulaly specify the type of pattern ("N", "A", "Ad", "M") and also their corresponding parameters
+
+error(method = c("A", "M"))
+
+trend(method = c("N", "A", "Ad"),
+      alpha = NULL, alpha_range = c(1e-04, 0.9999),
+      beta = NULL, beta_range = c(1e-04, 0.9999),
+      phi = NULL, phi_range = c(0.8, 0.98))
+
+season(method = c("N", "A", "M"), period = NULL,
+       gamma = NULL, gamma_range = c(1e-04, 0.9999))
+
+In the following R-chunk, you can change parameters and the type of pattern to see their impact on fitting and forecast
+  
+```{r alpha}
+admission_ets <- ambulance_demand_total %>%
+  model(
+    `alpha = 0.05` = ETS(demand ~ error("A") + trend("A", alpha = .05) + season("N")),
+    `alpha = 0.15` = ETS(demand ~ error("A") + trend("A", alpha = .15) + season("N")),
+    `alpha = 0.5` = ETS(demand ~ error("A") + trend("A", alpha = .5) + season("N")),
+    `alpha = 0.9` = ETS(demand ~ error("A") + trend("A", alpha = .9) + season("N"))
+  )
+
+admission_ets %>% augment() %>% filter_index("2016" ~ .) %>% 
+  ggplot(aes(x=date))+
+  geom_line(aes(y=demand, colour= "Actual"))+
+  geom_line(aes(y=.fitted, colour= factor(.model)))+
+  ggthemes::scale_color_colorblind()+
+  labs(colour ="")
+  
+```
+
+You can also explore `beta` ,`phi` and `gamma`
+
+```{r parameter-ets}
+admission_ets <- ambulance_demand_total %>%
+  model(
+    simple_ES = ETS(value ~ error("A") + trend("N", alpha = 0.1) + season("N")),
+    Holt = ETS(value ~ error("A") + trend("A", alpha = 0.1, beta = .15) + season("N")),
+    holt_damped = ETS(value ~ error("A") + trend("Ad", alpha = 0.1, beta = .1, phi = .8) + season("N")),
+    holt_winter = ETS(Trips ~ error("A") + trend("A", alpha = 0.1, beta = .1) + season("A", gamma = .05))
+  )
+```
+
+You can visualise forecasts:
+
+```{r forecast-viz}
+fc <- admission_ets %>% forecast(h = "42 days")
+fc %>%
+  autoplot(filter_index(ambulance_demand_total, "2018" ~ .), level = NULL) +
+  labs(title="Australian domestic tourism",
+       y="Overnight trips (millions)") +
+  guides(colour = guide_legend(title = "Forecast"))
+```

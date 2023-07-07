@@ -1,0 +1,238 @@
+---
+title: "Regression"
+execute:
+  echo: false
+format: html
+---
+
+
+```{r}
+#| label: setup
+#| include: false
+library(tidyverse)
+library(fpp3)
+library(lubridate)
+
+ambulance_demand_tsb <- read_rds("../data/ambulance_demand_tsb.rds")
+admission_regression <- ambulance_demand_tsb %>% index_by(date) %>% summarise(demand=sum(demand))
+admission_regression <- read_rds("../data/admission_regression.rds")
+```
+
+# Lab session 9: time series regression
+
+when doing time series forecasting using fable, we need to have always one tsibble containing all variables for the modeling including the forecast variable and all predictors.
+
+check whether temperature and arrival has a linear relationship
+
+```{r scatter-plot}
+ggplot(admission_regression, aes(x=average_daily_temperature, y=arrival))+
+  geom_point()+
+  geom_smooth()
+```
+
+The linear relationship does not seem to be strong.
+
+## Cross correlation and lagged/lead predictors
+
+```{r lag-lead}
+library(astsa)
+#lag2.plot from astsa package can be used to visualise leading predictors
+lag2.plot(admission_regression$average_daily_temperature, admission_regression$arrival, max.lag = 14)
+
+
+# create a cross correlation plot
+ccf(admission_regression$average_daily_temperature, admission_regression$arrival)
+
+
+```
+
+
+## Specify time series regression model usign `fable`
+
+The function to train a  linear time series regression model in fable is `TSLM()` which can include trend, seasonality, and external factors:
+
+we tart by splitting data into two sets to describe the modeling process. We leave out 42 periods (equal to forecast horizon) as test set, and we pretend this is the future we want to forecast. 
+
+```{r split}
+# train models response ~ term1+term2+term3+...
+f_horizon <- 42# forecast horizon
+test <- admission_regression %>% filter(date >= (max(date)-f_horizon+1))
+train <- admission_regression %>% filter(date < (max(date)-f_horizon+1))
+```
+
+We specify four models with different components and train them on the dataset:
+
+```{r train}
+fit_regression <- train %>% model(
+  lr=TSLM(arrival ~ trend(knot = "")+season()),
+  lr_temperature=TSLM(arrival ~ trend()+season()+average_daily_temperature),
+  lr_holiday=TSLM(arrival ~ trend()+season()+black_friday+boxing_day+christmas_day+halloween_day+new_years_day),
+  lr_temperature_holiday=TSLM(arrival ~ trend()+season()+average_daily_temperature+black_friday+boxing_day+christmas_day+halloween_day+new_years_day)
+)
+```
+
+You can use `report()` function to get a summary of the regression output, this will tell you which variables are useful in explaining the variation in the admission, higher stars (e.g **** menas more significant)
+
+```{r regression-output}
+fit_regression %>% select(lr) %>% report()
+fit_regression %>% select(lr_temperature) %>% report()
+fit_regression %>% select(lr_holiday) %>% report()
+fit_regression %>% select(lr_temperature_holiday) %>% report()
+```
+
+Get a summary of estimated parameters and corresponding statistics:
+
+```{r regression-summary}
+fit_regression %>% report()# provide an output of models with parameters estimated
+fit_regression %>% tidy()# provide estimated parameters and their significance
+```
+
+
+## Produce forecasts
+
+now, let's forecast using the trained models. Forecasting with the presence of exogenous variables(such as temperature and holiday) is slightly different than just using time series.
+We agree that we know the exact date of holidays in advance but we don't know the temperature! Therefore, we need to use the estimated temperature values instead of actual that we have in test set. Because if we forecast for real future (e.g. next week), we don't know true forecast, we have estimate the temperature or use the estimation published by someone else(e.g Met office). 
+It is important to know the difference between to Ex-ante and Ex-post. explore this yoursel!
+
+Here we could get forecast from Met office, or use a model to forecast the temperature. This is what we do here, we use ETS to forecast temperature and replace it with actual temperature in `test` object.
+This is a very important point for all predictors used in your regression model, if they are not deterministic like holidays. Let's forecast the temperature then:
+
+```{r temperature-estimation}
+fcs_ets_temperature <- train %>% model(ets=ETS(average_daily_temperature)) %>% forecast(h=f_horizon)
+temperature_forecast <- fcs_ets_temperature %>% as_tibble() %>% select(.mean)
+test_future <- bind_cols(test,temperature_forecast) %>%
+  mutate(average_daily_temperature=.mean) %>% select(-.mean,-arrival)
+
+```
+
+Now we can forecast using trained models, but there is a difference with previous models  like SNAIVE, ETS, ARIMA.
+If you have exogenous variable (e.g. temperature, holidays, etc) you nee to pass the future data instead of the `h=` using the `new_data =` argument:
+:
+
+```{r forecast-regression, options}
+fcst_regression <- fit_regression %>% forecast(new_data = test_future)
+```
+
+you can visualise your forecast and see how the forecast looks like visually for the 42 days we predicted:
+
+```{r visualise}
+fcst_regression %>% autoplot(filter_index(admission_daily, "2016" ~ .), level=NULL)# visualise it
+```
+
+Calculating the forecast accuracy is similar to other models:
+
+```{r calculate-accuracy}
+fcst_regression %>% 
+  accuracy(admission_regression,
+           measures = list(point_accuracy_measures,
+                           interval_accuracy_measures
+))
+```
+
+# Time series cross validation with exogenious variables
+
+How do we do TSCV when having exogenous variables? I provide the code without explaining it
+Try to replicate and understand the code!
+
+```{r tscv-regression}
+f_horizon <- 42# forecast horizon
+percentage_test <- 0.2 #20% of time series for test set
+
+test <- admission_regression |> 
+  filter_index(as.character(max(admission_regression$date)-round(percentage_test*length(unique(admission_regression$date)))+1) ~ .)
+
+train <- admission_regression |>
+  filter_index(. ~ as.character(max(admission_regression$date)-(round(percentage_test*length(unique(admission_regression$date))))))
+
+
+train_tscv <- admission_regression |> 
+  filter_index(. ~ as.character(max(admission_regression$date)-(f_horizon))) |>
+  stretch_tsibble(.init = length(unique(train$date)), .step = 7) # split data into different time series (i.e. origin or id) with increasing size
+
+# you need also to get future values that correspond to each .id, because you need them in the forecast model:
+test_tscv <- test %>% 
+  slide_tsibble(.size = f_horizon, .step = 7, .id = ".id") %>% select(-arrival)
+```
+
+It is important to replace average_daily_temperature values in the test_tr with its estimation, otherwise we use perfect forecast for the temperature in the regression model which can mislead us in choosing the most accurate model. I don't have access to the forecast, so here I forecast them using ETS:
+
+```{r fct-temperature}
+
+fcs_ets_temperature_tscv <- train_tscv %>% model(ets=ETS(average_daily_temperature)) %>% 
+  forecast(h=f_horizon)
+
+temperature_forecast_tscv <- fcs_ets_temperature_tscv %>% as_tibble() %>% select(.mean)
+test_future_tscv <- bind_cols(test_tscv,temperature_forecast_tscv) %>%
+  mutate(average_daily_temperature=.mean) %>% select(-.mean)
+```
+
+We can train time series cross validation time series with regression models and any other models: 
+
+```{r fsct-regression}
+fit_tscv <- tarin_tscv %>% filter(date< (max(date)-f_horizon+1)) %>% model(
+  lr=TSLM(arrival ~ trend()+season()),
+  lr_temperature=TSLM(arrival ~ trend()+season()+average_daily_temperature),
+  lr_holiday=TSLM(arrival ~ trend()+season()+black_friday+boxing_day+christmas_day+halloween_day+new_years_day),
+  lr_temperature_holiday=TSLM(arrival ~ trend()+season()+average_daily_temperature+black_friday+boxing_day+christmas_day+halloween_day+new_years_day),
+  naive=NAIVE(arrival),
+  snaive=SNAIVE(arrival),
+  mean=MEAN(arrival)
+)
+```
+
+We can forecast using trained models:
+
+```{r forecast-regression, options}
+fcst_tscv <- fit_tscv %>% forecast(new_data = test_future_tscv)
+```
+
+Let's compare the forecast accuracy of all models:
+
+```{r calculate-accuracy}
+fcst_accuracy <- fcst_tscv %>% 
+  accuracy(admission_regression,
+           measures = list(point_accuracy_measures,
+                           interval_accuracy_measures
+)) 
+
+fcst_accuracy %>% select(.model, RMSE,MAE,winkler) %>% arrange(RMSE,MAE,winkler)
+```
+
+The best forecasting method from the pool of methods we selected is regression with holidays(well, this could also be improved by including more variables or removing the holidays that are not significant).
+
+Question: Can you check the residual diagnostics for the winning model(rgeression with holidays)? what residuals tell us?
+
+
+Now, we need to generate forecast. In order to generate forecast, we need to get the values of predictors in the future corresponding to the forecast horizon, we first need to use `new_data()` followed by some data manipulation to get the new data required for forecasting:
+
+```{r fct-new-data}
+test_future_admission <- new_data(admission_daily, n=f_horizon) %>% 
+  mutate(black_friday=if_else((lubridate::mday(date)== 26 & lubridate::month(date)== 11),1,0),
+         boxing_day=if_else((mday(date)== 26 & month(date)== 12),1,0),
+         christmas_day=if_else((mday(date)== 25 & month(date)== 12),1,0),
+         halloween_day=if_else((mday(date)== 31 & month(date)== 10),1,0),
+         new_years_day=if_else((mday(date)== 01 & month(date)== 01),1,0)
+         )
+
+# Here I show how we produce estimation of the temperature for the future in case we need it to use (in our example, we don't need it because the best model is regression with holidays)
+fcs_temperature_future <- admission_regression %>% model(ets=ETS(average_daily_temperature)) %>% 
+  forecast(h=f_horizon)
+
+tempreature_future <- fcs_temperature_future %>% as_tibble() %>% select(.mean)
+predcitors_future <- bind_cols(test_future_admission,predcitors_future) %>%
+  mutate(average_daily_temperature=.mean) %>% select(-.mean)
+```
+
+Forecast using  regression with holidays for the future:
+
+```{r forecast-regression, options}
+fcst <- admission_regression %>% 
+  model(lr_holiday=TSLM(arrival ~ trend()+season()+black_friday+boxing_day+christmas_day+halloween_day+new_years_day)) %>% 
+  forecast(new_data = predcitors_future)
+```
+
+
+```{r visualise}
+fcst %>% autoplot(filter_index(admission_daily, "2016" ~ .))# visualise it
+```
+

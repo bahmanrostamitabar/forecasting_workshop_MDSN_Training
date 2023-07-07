@@ -1,0 +1,183 @@
+---
+title: "ARIMA models"
+execute:
+  echo: false
+format: html
+---
+
+
+```{r}
+#| label: setup
+#| include: false
+library(tidyverse)
+library(fpp3)
+library(lubridate)
+
+ambulance_demand_tsb <- read_rds("../data/ambulance_demand_tsb.rds")
+ambulance_demand_total <- ambulance_demand_tsb %>% index_by(date) %>% summarise(demand=sum(demand))
+```
+
+# Lab session 8: ARIMA
+
+## Specify ARIMA model and estimate parameters
+
+The function for arima models in fable is `ARIMA()`
+
+If you want this function automatically determines the order of autoregressive and moving average orders and their parameters, then you don't need to provide arguments inside ARIMA(). The function will examine different models (combinations of p=0,1,2,.. and q =0,1,2,.., P=0,1,2,.. and Q =0,1,2,..) and return the one with lowest AICc.
+
+
+```{r fit-arima}
+admission_arima <- ambulance_demand_total %>%
+  model(
+    automatic_arima = ARIMA(demand)
+  )
+```
+
+let's now observe the fitted model
+
+```{r onserve-model}
+admission_arima %>% report()# provide an output of models with parameters estimated
+admission_arima %>% tidy()# provide estimated parameters and their significance
+admission_arima %>% glance()# provide information criteria
+```
+
+You can also specify the order of p,q,P,Q using specific function `pdq()` and `PDQ()`:
+
+```{r label, options}
+admission_arima <- ambulance_demand_total %>%
+  model(
+    automatic_arima = ARIMA(demand),
+    arima1=ARIMA(demand ~ pdq(1,1,1)+PDQ(0,0,1)),
+    arima2 = ARIMA(demand ~ pdq(3,1,0)+PDQ(1,0,0)),
+    ar = AR(demand)
+  ) |> mutate(comibation = (automatic_arima+arima2+ar)/3)
+```
+
+Now, we can forecast with the fitted ARIMA model:
+
+```{r forecast-ets, options}
+admission_fcst_arima <- admission_arima %>% forecast(h =f_horizon) 
+```
+
+you can visualise your forecast:
+
+```{r visualise}
+admission_fcst_arima %>% autoplot(filter_index(ambulance_demand_total, "2016" ~ .))# visualise it
+```
+
+
+# If you want to know more
+
+## Stationary vs. non-stationairy time series
+
+look at daily data, do they look like stationary data (stationairy data is roughly a horizontal line)? We can start by looking at a time plot:
+
+```{r time-plot}
+ambulance_demand_total %>% autoplot()
+```
+
+Now, look at the autocorrelation plot: 
+
+```{r acf-plot}
+ambulance_demand_total %>% ACF(lag_max = 21) %>% autoplot()
+```
+
+there are significant autocorrelation lags which decreases as lag increases. This indicate a non-statioaniry series.
+
+You can also do a statistical test (KPSS) to see whether time series is stationary or not. we use the Kwiatkowski-Phillips-Schmidt-Shin (KPSS) test. In this test, the null hypothesis is that the data are stationary, and we look for evidence that the null hypothesis is false. Consequently, small p-values (e.g., less than 0.05) suggest that time series is non-stationairy and differencing is required to make it stationairy. The test can be computed using the unitroot_kpss() function.
+
+To conduct the test we use `features() function:
+
+```{r test}
+ambulance_demand_total %>% features(demand,unitroot_kpss)
+```
+
+Does it tell if data is non-stationary?
+
+You can use the same function but instead of `unitroot_kpss` , you can use `unitroot_ndiffs`. This will tell you how many differencing you need to make the time series stationairy:
+
+```{r ndiff}
+ambulance_demand_total %>% features(demand,unitroot_ndiffs)
+```
+
+This will determine the value of `d=` in ARIMA(p,d,q).
+
+```{r nsdiff}
+ambulance_demand_total %>% features(demand,unitroot_ndiffs)
+```
+
+If seasonality is presnet , you need seasonal differencing to make series stationary. this will tell us what would be the vale of D in ARIMA (p,d,q) (P,D,Q)
+
+## Determining values of p,q , P,Q
+
+```{r determine-order}
+ambulance_demand_total %>% ACF(demand, lag_max = 21) %>% autoplot()# what does the ACF tell us? 
+ambulance_demand_total %>% PACF(demand) %>% autoplot()# what is PACF?
+```
+
+Using ACF and PACF help us to determine the order of p, q. look at the properties of MA(q) and AR(p) in slides to ssee how ACF and PACF can be used to determine p,q,P,Q
+
+## Using simulation to understand ARMA process
+
+You can simulate different ARMA processes and their parameters, this might be helpful in understanding how ARMA works. Let's start with AR(1):
+
+
+This is the simulation for AR(1) with Phi= 0.9
+
+```{r ar1}
+set.seed(1)
+ar1 <- arima.sim(list(order=c(1,0,0),ar=0.9),n=1000)
+ar1_tsb <- tibble(day=seq(1,length(ar1),1), ar=ar1) %>% as_tsibble(index = day)
+ar1_tsb %>% autoplot()
+ar1_tsb %>% ACF %>%  autoplot()
+ar1_tsb %>% PACF %>%  autoplot()
+```
+
+Now, simulate AR(2) with phi1 and phi2
+
+```{r ar2}
+set.seed(1)
+ar2 <- arima.sim(list(order=c(2,0,0),ar=c(-0.2,0.35)),n=1000)
+ar2_tsb <- tibble(day=seq(1,length(ar1),1), ar=ar2) %>% as_tsibble(index = day)
+ar2_tsb %>% autoplot()
+ar2_tsb %>% ACF %>%  autoplot()
+ar2_tsb %>% PACF %>%  autoplot()
+```
+
+
+### MA 
+
+```{r ma1}
+set.seed(1)
+ma1 <- arima.sim(list(order=c(0,0,1),ma=0.7),n=10000)
+ma1_tsb <- tibble(day=seq(1,length(ma1),1), ma=ma1) %>% as_tsibble(index = day)
+ma1_tsb %>% autoplot()
+ma1_tsb %>% ACF %>%  autoplot()
+ma1_tsb %>% PACF %>%  autoplot()
+```
+
+
+```{r ma2}
+set.seed(1)
+ma2 <- arima.sim(list(order=c(0,0,2),ma=c(0.3,0.5)),n=10000)
+ma2_tsb <- tibble(day=seq(1,length(ma1),1), ma=ma1) %>% as_tsibble(index = day)
+ma2_tsb %>% autoplot()
+ma2_tsb %>% ACF %>%  autoplot()
+ma2_tsb %>% PACF %>%  autoplot()
+```
+
+### ARMA 
+
+```{r arma}
+set.seed(1)
+phi <- 0.9
+theta <- 0.5
+my_model <- list(order=c(1,0,1),ar=phi,ma=theta)
+arma11 <- arima.sim(my_model,n=10000)
+arma11_tsb <- tibble(day=seq(1,length(arma11),1), arma=arma11) %>% as_tsibble(index = day)
+arma11_tsb %>% autoplot()
+arma11_tsb %>% ACF %>%  autoplot()
+arma11_tsb %>% PACF %>%  autoplot()
+```
+
+

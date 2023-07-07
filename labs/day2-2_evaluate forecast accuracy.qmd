@@ -1,0 +1,206 @@
+---
+title: "Evaluate and report forecast accuracy"
+execute:
+  echo: false
+format: html
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r}
+#| label: setup
+#| include: false
+library(tidyverse)
+library(fpp3)
+library(lubridate)
+
+ambulance_demand_tsb <- read_rds("../data/ambulance_demand_tsb.rds")
+ambulance_demand_total <- ambulance_demand_tsb %>% index_by(date) %>% summarise(demand=sum(demand))
+
+#ambulance_demand_total_monthly <- ambulance_demand_total |> index_by(month=yearmonth(date)) |> summarise( demand=sum(demand))
+```
+
+# Lab session 5: Evaluate and report forecast accuracy
+
+In a typical forecasting task, you compare multiple forecasting models and choose one that provides more accuracy. The most robust way to choose the best forecasting model is to use time series cross validation.
+
+## Time series cross validation
+
+This is also called rolling forecast or rolling origin:
+You can also reflect on the following questions:
+- Why do we use TSCV? you can read more here: https://otexts.com/fpp3/tscv.html
+- How do we do TSCV in R? Which steps to follow?
+      1. split data using `filter_index()`
+      2. create different time series (different origins)
+      2. model each time series, 
+      3. forecast for each series 
+
+let's see how we do it in R:
+
+1. split data
+
+We initially split the data into test and train, the size of test set equals the forecast horizon, we use this for the purpose of visualisating the forecasts, not deciding which model is the best(more accurate)
+
+```{r split}
+f_horizon <- 42# forecast horizon is 42 days
+percentage_test <- 0.2 #20% of time series for test set
+
+test <- ambulance_demand_total |> 
+  filter_index(as.character(max(ambulance_demand_total$date)-round(percentage_test*length(unique(ambulance_demand_total$date)))+1) ~ .)
+
+train <- ambulance_demand_total |>
+  filter_index(. ~ as.character(max(ambulance_demand_total$date)-(round(percentage_test*length(unique(ambulance_demand_total$date))))))
+```
+
+2. Use `stretch_tsibble()` to Create different timeseries (i.e different id)
+
+We apply time series cross validation on the train data. We first start with an initial training size (.init = ) and then increase the size of the previous time series by adding more new observation(.step=) to create a new time series, we continue creating these timeseries until the number of observation left at the end of timeseries equals to the forecast horizon, we stop there.
+
+```{r rolling-origin-series}
+train_tscv <- ambulance_demand_total |> 
+  filter_index(. ~ as.character(max(ambulance_demand_total$date)-(f_horizon))) |>
+  stretch_tsibble(.init = length(unique(train$date)), .step = 7) # split data into different time series (i.e. origin or id) with increasing size
+```
+
+`.init` is the size of initial time series, `.step` is the increment step $\geq1$, this can correspond to the forecasting frequency, how often you generate the forecast. if .step=1 in a daily time series, it means we generate forecasts very day for the forecast horizon.
+
+> How many time series(samples) did we create with this process? what is the new variable .id?
+
+As you can see we have created many time series (samples), this means different situations where forecasting models are evaluated, so if any model performs well for all these situations, we are feel confident to use it for producing forecasts in the future.
+
+>What is the purpose of using `filter_index(. ~ as.character(max(ambulance_demand_total$date)-(f_horizon)))`? Remember , we have to stop creating rolling origin series when we have only 42 observations left (equal to forecast horizon)
+
+
+3. train models for each time series (for each value of `.id` variable)
+
+```{r train-model}
+model_tscv <- train_tscv |>
+model(
+    mean = MEAN(demand),#total average
+    naive = NAIVE(demand),#naive
+    snaive = SNAIVE(demand),#seasonal naive
+  )
+```
+
+
+You can observe `model_tscv` by selecting (just double click on it) and running it, this is our model table (mable). We get one column for each forecasting model that is applied to each time series (rows).  inside each cell(e.g.<S3: lst_mdl>) we have the fitted(trained) model with its components ad parameters.
+
+You can also use the functions introduced above to investigate fitted models to each .id:
+
+```{r extract-info-tscv}
+model_tscv |> ???()
+model_tscv |> filter(.id==2) |> glance() # if you want to observe one specific .id
+model_tscv |> ???() 
+```
+
+4. Forecast for each series
+
+Now, we want to produce forecast for 42 days that is applied to all time series created using TSCV:
+
+```{r fcst-series}
+fcst_tscv <- model_tscv |> forecast(h = f_horizon)
+fcst_tscv #observe ae_fcst_tscv
+```
+
+This will create a forecast table or `fable` object. Observe it and look at the columns.
+What is `demand` and `.mean` in fcst_tscv?
+
+in `fcst_tscv` (a fable object) each .id is representing the forecast for each series.
+
+## Evaluate forecast accuracy
+
+You calculate the point forecast accuracy using `accuracy()` function. `accuracy()` needs both the forecast object(fable) and actual data.
+
+```{r label, options}
+fc_accuracy <- fcst_tscv |> accuracy(ambulance_demand_total)
+
+fc_accuracy |> select(.model, RMSE, RMSSE)
+
+fc_accuracy_ALL <- fcst_tscv |> accuracy(ambulance_demand_total, 
+                                     measures = list(point_accuracy_measures, interval_accuracy_measures, distribution_accuracy_measures))
+```
+
+This will provide a summary of multiple accuracy measures. The result is summarised automatically across all series (.id) using a simple average.
+
+Now let's see how we can get the accuracy measure for each .id separately instead of averaging across all of them. To do this, you need to use an additional argument in accuracy(by=):
+
+```{r label, options}
+fc_accuracy_by_id <- fcst_tscv |>
+  accuracy(ambulance_demand_total, 
+           measures = list(point_accuracy_measures, interval_accuracy_measures, distribution_accuracy_measures),
+           by = c(".model",".id"))
+```
+
+We can now create some insightful visualisations:
+
+```{r label, options}
+fc_accuracy_variation <- fc_accuracy_by_id |> select(.id,.model,RMSE)
+
+  ggplot(data=fc_accuracy_density, mapping = aes(RMSE))+
+    geom_density(aes(fill=factor(.model)), alpha=.5)+
+    ggthemes::theme_few()
+
+ggplot(data=fc_accuracy_variation, aes(RMSE))+
+    geom_boxplot(aes(fill=factor(.model)), alpha=.5)
+```
+
+What if you want to get the accuracy measure for each model and each horizon (h=1, 2,...,42)?
+
+In fable we don't get automatically a column that corresponds to forecast horizon(h=1,2,3,..., 42). If this is something you are interested in, you can do it yourself, let's first observe the first 50 observations to see the difference later:
+
+```{r view_h}
+View(fcst_tscv[1:50,])
+```
+
+We first need to group by `id` and `.model` and then create a new variable called `h` and assign row_number() to it( you can type ?row_number in your Console to see what this function does, it simply returns the number of row)
+
+```{r label, options}
+fc_h <- fcst_tscv |> 
+  group_by(.id,.model) |> 
+  mutate(h=row_number()) |> ungroup() |> 
+  as_fable(response = "demand", distribution = "demand")
+
+View(ae_fc[1:50,])# view the first 43 rows of ae_fc observe h
+```
+
+Now check rows from 42 to 50 to see the difference.
+
+To calculate the accuracy measures for each horizon and model, follow this:
+
+```{r accuracu_h}
+fc_accuracy_h <- fc_h |> 
+accuracy(ambulance_demand_total,
+         measures = list(point_accuracy_measures, interval_accuracy_measures, distribution_accuracy_measures),
+         by = c(".model","h"))
+tail(fc_accuracy)
+```
+
+
+```{r}
+ggplot(data = fc_accuracy_h, mapping = aes(x = h, y = MASE, color = .model))+
+  geom_point()+
+  geom_line()+
+  ggthemes::theme_few()+
+  ggthemes::scale_color_colorblind()
+```
+
+
+you can select any accuracy measure you want using `select()`, alternatively you can calculate them
+
+```{r which-accuracy}
+#only point forecast
+ fcst_tscv |>
+  accuracy(train) |> select(.model, RMSE, MAE)
+```
+
+You can specify which accuracy measure you want using `measures = list()`
+
+```{raccuracy-measures}
+#both point forecast accuracy and winkler score and CRPS
+ae_fcst_tscv |> 
+  accuracy(train,
+           measures = list(???,
+                           ???
+)) 
+```

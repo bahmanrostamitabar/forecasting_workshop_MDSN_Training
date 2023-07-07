@@ -1,0 +1,130 @@
+---
+title: "prepare data for analysis and forecasting"
+execute:
+  echo: false
+format: html
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r}
+#| label: setup
+#| include: false
+library(tidyverse)
+library(fpp3)
+library(lubridate)
+```
+
+# Lab 1: Prepare data for forecasting
+
+## Read data
+
+```{r}
+#| label: admision
+ambulance_demand <- read_rds("data/ambulance_demand.rds")
+ambulance_demand
+getwd()
+```
+
+## Check duplications and fix it
+
+```{r}
+#| label: duplicate
+#2.1- 
+ambulance_demand |> duplicated() |> sum()#check duplicates
+
+#ambulance_demand |> dplyr::distinct()# remove duplicates and get a distinct tibble
+```
+
+## Create tsibble
+
+```{r}
+#| label: tsibble
+ambulance_demand_tsb <- ambulance_demand |> 
+  as_tsibble(index = date, key = lhb)
+class(ambulance_demand_tsb)# check the class
+#ambulance_demand_tsb |> as_tibble()#this converts a tsibble to a tibble
+```
+
+
+## Create a new tsibble which has a regular interval
+
+_Choosing appropriate temporal intervals to make equally space intervals_
+
+Here we discuss only equally spaced intervals in time series. so, if your data has an irregular index, e.g. arrival time, arrival time, call time, etc, you need to use `regular= ---` in as_tsibble, following that you need to regularise the irregular index by creating a new tsibble with equally spaced intervals which we call time period or temporal granularity. This will help you to create time series with different granularity such as weekly, monthly, quarterly time series.
+
+What temporal granularity should `arrivals` have?
+
+A balancing act between:
+
+-   The temporal detail needed for the forecasts
+-   Enough detail/signal in the data for a good model
+
+This choice has a big impact on the seasonal structures that will exist in the data! 
+
+
+Let's start by creating an daily time series of admissions. 
+
+
+## Check implicit missing values / gaps in time and fill gaps
+
+```{r}
+#| label: implicit-missing-value
+has_gaps(ambulance_demand_tsb)#check gaps
+scan_gaps(ambulance_demand_tsb)# show me gaps
+count_gaps(ambulance_demand_tsb)# count gaps
+
+#If there is any gap, then fill it.
+#ambulance_demand_tsb <- ambulance_demand_tsb |> fill_gaps(???)
+```
+
+You can use `index_by()` and `summarise()` to regularise index and create different temporal granularity.
+
+## Create time series with different time granularities without keys
+
+What happens if you ignore groub_by() in the r chunk?
+
+How would you create weekly granularity?
+
+```{r}
+#| label: weekly
+weekly_ambulance_demand <- ambulance_demand_tsb |>
+  index_by(week = yearweek(date)) |>
+  summarise(demand = sum(demand))
+
+weekly_ambulance_demand_key <- ambulance_demand_tsb |> group_by_key(lhb) |> 
+  index_by(week = yearweek(date)) |>
+  summarise(demand = sum(demand))
+```
+
+How would you create a monthly granularity?
+
+```{r}
+#| label: monthly
+monthly_ambulance_demand <- ambulance_demand_tsb |> index_by(month = yearmonth(date)) |>
+  summarise(demand = sum(demand))
+
+monthly_ambulance_demand_key <- ambulance_demand_tsb |> index_by(month = yearmonth(date)) |> group_by_key(lhb) |> 
+summarise(demand = sum(demand))
+```
+
+How would you create quarterly granularity?
+
+```{r}
+#| label: quarterly
+quarterly_ambulance_demand <- ambulance_demand_tsb |> index_by(quarter = yearquarter(date)) |>
+  summarise(demand = sum(demand))
+
+quarterly_ambulance_demand_key <- ambulance_demand_tsb |> index_by(quarter = yearquarter(date)) |> group_by_key(lhb) |> 
+summarise(demand = sum(demand))
+```
+
+
+```{r}
+as_tibble(quarterly_ambulance_demand_key) |> select(lhb,demand)
+
+write_rds(ambulance_demand_tsb, "data/ambulance_demand_tsb.rds")
+getwd()
+```
+
